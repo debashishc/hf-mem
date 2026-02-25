@@ -19,7 +19,7 @@ Read more information about `hf-mem` in [this short-form post](https://alvarobar
 uvx hf-mem --model-id MiniMaxAI/MiniMax-M2
 ```
 
-<img src="https://github.com/user-attachments/assets/530f8b14-a415-4fd6-9054-bcd81cafae09" />
+<img src="https://github.com/user-attachments/assets/530f8b14-a415-4fd6-9054-bcd81cafae09" width="600" />
 
 ### Diffusers
 
@@ -27,7 +27,7 @@ uvx hf-mem --model-id MiniMaxAI/MiniMax-M2
 uvx hf-mem --model-id Qwen/Qwen-Image
 ```
 
-<img src="https://github.com/user-attachments/assets/cd4234ec-bdcc-4db4-8b01-0ac9b5cd390c" />
+<img src="https://github.com/user-attachments/assets/cd4234ec-bdcc-4db4-8b01-0ac9b5cd390c" width="600" />
 
 ### Sentence Transformers
 
@@ -35,7 +35,7 @@ uvx hf-mem --model-id Qwen/Qwen-Image
 uvx hf-mem --model-id google/embeddinggemma-300m
 ```
 
-<img src="https://github.com/user-attachments/assets/a52c464b-a6c1-446d-9921-68aaefb9df88" />
+<img src="https://github.com/user-attachments/assets/a52c464b-a6c1-446d-9921-68aaefb9df88" width="600" />
 
 ## Experimental
 
@@ -45,11 +45,11 @@ By enabling the `--experimental` flag, you can enable the KV Cache memory estima
 uvx hf-mem --model-id MiniMaxAI/MiniMax-M2 --experimental
 ```
 
-<img src="https://github.com/user-attachments/assets/64eaff88-d395-4d8d-849b-78fb86411dc3" />
+<img src="https://github.com/user-attachments/assets/64eaff88-d395-4d8d-849b-78fb86411dc3" width="600" />
 
 ## GPU Count Estimation
 
-You can estimate how many GPUs are needed to host the model weights (and KV cache too if `--experimental` is enabled).
+You can estimate how many GPUs are needed to host the model weights (and optionally the KV cache when `--experimental` is also enabled).
 
 List supported GPU presets:
 
@@ -57,29 +57,35 @@ List supported GPU presets:
 uvx hf-mem --list-gpus
 ```
 
-Estimate GPU count for a model:
+Estimate GPU count for a model (weights only):
 
 ```bash
 uvx hf-mem --model-id Qwen/Qwen3.5-397B-A17B-FP8 --gpu h100
 ```
 
-Reserve headroom with `--overhead`:
+<img src="https://github.com/user-attachments/assets/239d6fa3-ae1b-4ac7-a97f-05af02c8fc1c" width="600" />
+
+Reserve headroom for runtime overhead with `--overhead` (e.g. `0.2` = 20% of VRAM reserved):
 
 ```bash
 uvx hf-mem --model-id Qwen/Qwen3.5-397B-A17B-FP8 --gpu h100 --overhead 0.2
 ```
 
-Override preset VRAM for cluster-specific variants:
+<img src="https://github.com/user-attachments/assets/d62496d0-5692-40d9-9712-1108f468e5a8" width="600" />
+
+Override the preset VRAM for cluster-specific variants:
 
 ```bash
 uvx hf-mem --model-id Qwen/Qwen3.5-397B-A17B-FP8 --gpu l40s --gpu-vram-gib 32
 ```
 
-Combine with KV cache estimation:
+Combine with KV cache estimation (weights + KV cache):
 
 ```bash
 uvx hf-mem --model-id Qwen/Qwen3.5-397B-A17B-FP8 --experimental --gpu h200
 ```
+
+<img src="https://github.com/user-attachments/assets/b0cd53aa-61b4-4a67-ae35-66622f3be628" width="600" />
 
 ## (Optional) Agent Skills
 
