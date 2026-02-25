@@ -49,7 +49,7 @@ uvx hf-mem --model-id MiniMaxAI/MiniMax-M2 --experimental
 
 ## GPU Count Estimation
 
-You can estimate how many GPUs are needed to host the model weights (and KV cache too if `--experimental` is enabled).
+You can estimate how many GPUs are needed to host the model weights (and optionally the KV cache when `--experimental` is also enabled).
 
 List supported GPU presets:
 
@@ -57,25 +57,42 @@ List supported GPU presets:
 uvx hf-mem --list-gpus
 ```
 
-Estimate GPU count for a model:
+```
+Name         VRAM (GiB)  Max/Node
+──────────── ──────────  ────────
+b200                192         8
+h200                141         8
+h100                 80         8
+gh200                96         1
+a100-80              80         8
+a100-40              40         8
+l40s                 48         8
+v100-32              32         8
+v100-16              16         8
+a10                  24         —
+rtx4090              24         —
+rtx3090              24         —
+```
+
+Estimate GPU count for a model (weights only):
 
 ```bash
 uvx hf-mem --model-id Qwen/Qwen3.5-397B-A17B-FP8 --gpu h100
 ```
 
-Reserve headroom with `--overhead`:
+Reserve headroom for runtime overhead with `--overhead` (e.g. `0.2` = 20% of VRAM reserved):
 
 ```bash
 uvx hf-mem --model-id Qwen/Qwen3.5-397B-A17B-FP8 --gpu h100 --overhead 0.2
 ```
 
-Override preset VRAM for cluster-specific variants:
+Override the preset VRAM for cluster-specific variants:
 
 ```bash
 uvx hf-mem --model-id Qwen/Qwen3.5-397B-A17B-FP8 --gpu l40s --gpu-vram-gib 32
 ```
 
-Combine with KV cache estimation:
+Combine with KV cache estimation (weights + KV cache):
 
 ```bash
 uvx hf-mem --model-id Qwen/Qwen3.5-397B-A17B-FP8 --experimental --gpu h200
