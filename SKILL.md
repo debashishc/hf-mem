@@ -27,12 +27,22 @@ Estimates inference memory requirements for models on the Hugging Face Hub via S
 uvx hf-mem --model-id <org/model-name>
 ```
 
-Or add `--experimental` since `hf-mem` 0.4.3 to include KV cache estimations for LLMs and VLMs too.
+Add `--experimental` to include KV cache estimations for LLMs and VLMs.
+
+Use GPU estimation flags when the user asks how many GPUs are needed:
+
+- `--list-gpus` to print supported GPU presets (works without `--model-id`)
+- `--gpu <name>` to estimate GPU count
+- `--overhead <fraction>` to reserve VRAM headroom (for example `0.2`)
+- `--gpu-vram-gib <value>` to override preset VRAM for cluster-specific configs
 
 ### Examples
 
 - `uvx hf-mem --model-id black-forest-labs/FLUX.1-dev`
 - `uvx hf-mem --model-id mistralai/Mistral-7B-v0.1 --experimental`
+- `uvx hf-mem --list-gpus`
+- `uvx hf-mem --model-id Qwen/Qwen3.5-397B-A17B-FP8 --gpu h100`
+- `uvx hf-mem --model-id Qwen/Qwen3.5-397B-A17B-FP8 --gpu l40s --gpu-vram-gib 32`
 
 ## When it fails
 
