@@ -57,23 +57,6 @@ List supported GPU presets:
 uvx hf-mem --list-gpus
 ```
 
-```
-Name         VRAM (GiB)  Max/Node
-──────────── ──────────  ────────
-b200                192         8
-h200                141         8
-h100                 80         8
-gh200                96         1
-a100-80              80         8
-a100-40              40         8
-l40s                 48         8
-v100-32              32         8
-v100-16              16         8
-a10                  24         —
-rtx4090              24         —
-rtx3090              24         —
-```
-
 Estimate GPU count for a model (weights only):
 
 ```bash
