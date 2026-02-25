@@ -63,7 +63,7 @@ Estimate GPU count for a model (weights only):
 uvx hf-mem --model-id Qwen/Qwen3.5-397B-A17B-FP8 --gpu h100
 ```
 
-<img src="https://github.com/user-attachments/assets/f28add99-c8e9-4865-89cb-352ea63cb0ff" width="600" />
+<img src="https://github.com/user-attachments/assets/239d6fa3-ae1b-4ac7-a97f-05af02c8fc1c" width="600" />
 
 Reserve headroom for runtime overhead with `--overhead` (e.g. `0.2` = 20% of VRAM reserved):
 
@@ -71,7 +71,7 @@ Reserve headroom for runtime overhead with `--overhead` (e.g. `0.2` = 20% of VRA
 uvx hf-mem --model-id Qwen/Qwen3.5-397B-A17B-FP8 --gpu h100 --overhead 0.2
 ```
 
-<img src="https://github.com/user-attachments/assets/95fdf2cf-95c8-4ebf-98be-64788ed2d51e" width="600" />
+<img src="https://github.com/user-attachments/assets/d62496d0-5692-40d9-9712-1108f468e5a8" width="600" />
 
 Override the preset VRAM for cluster-specific variants:
 
@@ -85,7 +85,7 @@ Combine with KV cache estimation (weights + KV cache):
 uvx hf-mem --model-id Qwen/Qwen3.5-397B-A17B-FP8 --experimental --gpu h200
 ```
 
-<img src="https://github.com/user-attachments/assets/b134b7c5-c7f9-42ca-b0a7-fe12d6961373" width="600" />
+<img src="https://github.com/user-attachments/assets/b0cd53aa-61b4-4a67-ae35-66622f3be628" width="600" />
 
 ## (Optional) Agent Skills
 
