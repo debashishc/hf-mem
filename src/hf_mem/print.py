@@ -1,3 +1,4 @@
+import math
 import warnings
 from typing import Any, Dict, Literal, Optional
 
@@ -74,11 +75,10 @@ def _print_divider(
 
 
 def _format_name(name: str, max_len: int = MAX_NAME_LEN) -> str:
-    if len(name) < MIN_NAME_LEN:
-        return f"{name:<{MIN_NAME_LEN}}"
-    if len(name) > max_len:
-        return name[: max_len - 3] + "..."
-    return f"{name:<{max_len}}"
+    target = max(MIN_NAME_LEN, max_len)
+    if len(name) > target:
+        return name[: target - 3] + "..."
+    return f"{name:<{target}}"
 
 
 def _print_row(name: str, text: str, current_len: int, name_len: int = MAX_NAME_LEN) -> None:
@@ -114,6 +114,7 @@ def print_report(
     revision: str,
     metadata: SafetensorsMetadata,
     cache: Optional[Dict[str, Any]] = None,
+    gpu: Optional[Dict[str, Any]] = None,
     ignore_table_width: bool = False,
 ) -> None:
     combined_total = metadata.bytes_count + cache["cache_size"] if cache else metadata.bytes_count
@@ -137,6 +138,12 @@ def print_report(
         centered_rows.append(
             f"KV CACHE ({cache['max_model_len'] * cache['batch_size']} TOKENS, {_bytes_to_gib(cache['cache_size']):.2f} GiB)"
         )
+    if gpu:
+        overhead_pct = int(gpu["overhead"] * 100)
+        overhead_str = f", {overhead_pct}% overhead" if overhead_pct > 0 else ""
+        centered_rows.append(
+            f"GPU ALLOCATION ({gpu['gpu_name']} \u2014 {gpu['gpu_vram_gib']:.0f} GiB VRAM{overhead_str})"
+        )
 
     data_rows = []
     if cache:
@@ -154,6 +161,15 @@ def print_report(
             )
     if cache:
         data_rows.append(f"{_bytes_to_gib(cache['cache_size']):.2f} / {_bytes_to_gib(combined_total):.2f} GiB")
+    if gpu:
+        sugg_label = (f" (suggested: {gpu['suggested_count']})"
+                      if gpu['suggested_count'] != gpu['raw_count'] else "")
+        data_rows.append(f"{gpu['raw_count']} \u00d7 {gpu['gpu_name']}{sugg_label}")
+        total_alloc = gpu["suggested_count"] * gpu["gpu_vram_bytes"]
+        pct = (combined_total / total_alloc) * 100 if total_alloc > 0 else 0
+        data_rows.append(f"{pct:.0f}% of {_bytes_to_gib(total_alloc):.0f} GiB")
+        data_rows.append(gpu["estimate_basis"])
+        data_rows.append(gpu["suggestion_reason"])
 
     max_centered_len = max(len(r) for r in centered_rows)
     max_data_len = max(len(r) for r in data_rows)
@@ -259,5 +275,30 @@ def print_report(
             kv_bar,
             data_col_width,
         )
+
+    if gpu:
+        _print_divider(data_col_width + 1, "top-continue")
+        overhead_pct = int(gpu["overhead"] * 100)
+        overhead_str = f", {overhead_pct}% overhead" if overhead_pct > 0 else ""
+        _print_centered(
+            f"GPU ALLOCATION ({gpu['gpu_name']} \u2014 {gpu['gpu_vram_gib']:.0f} GiB VRAM{overhead_str})",
+            current_len,
+        )
+        _print_divider(data_col_width + 1, "top")
+
+        sugg_label = (f" (suggested: {gpu['suggested_count']})"
+                      if gpu['suggested_count'] != gpu['raw_count'] else "")
+        _print_row("GPUs NEEDED", f"{gpu['raw_count']} \u00d7 {gpu['gpu_name']}{sugg_label}", data_col_width)
+
+        total_alloc = gpu["suggested_count"] * gpu["gpu_vram_bytes"]
+        pct = (combined_total / total_alloc) * 100 if total_alloc > 0 else 0
+        _print_row("UTILIZATION", f"{pct:.0f}% of {_bytes_to_gib(total_alloc):.0f} GiB", data_col_width)
+        _print_row("", _make_bar(combined_total, total_alloc, data_col_width), data_col_width)
+        _print_row("BASIS", gpu["estimate_basis"], data_col_width)
+        _print_row("SUGGESTION", gpu["suggestion_reason"], data_col_width)
+
+        if gpu["max_per_node"] and gpu["suggested_count"] > gpu["max_per_node"]:
+            nodes = math.ceil(gpu["suggested_count"] / gpu["max_per_node"])
+            _print_row("MULTI-NODE", f"~{nodes} nodes \u00d7 {gpu['max_per_node']} GPUs", data_col_width)
 
     _print_divider(data_col_width + 1, "bottom")

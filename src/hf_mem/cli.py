@@ -13,7 +13,16 @@ import httpx
 
 from hf_mem.metadata import parse_safetensors_metadata
 from hf_mem.print import print_report
-from hf_mem.types import TorchDtypes, get_safetensors_dtype_bytes, torch_dtype_to_safetensors_dtype
+from hf_mem.types import (
+    GpuSpec,
+    TorchDtypes,
+    compute_gpu_count,
+    format_gpu_table,
+    get_suggestion_reason_text,
+    get_gpu_spec,
+    get_safetensors_dtype_bytes,
+    torch_dtype_to_safetensors_dtype,
+)
 
 # NOTE: Defines the bytes that will be fetched per safetensors file, but the metadata
 # can indeed be larger than that
@@ -88,6 +97,11 @@ async def run(
     batch_size: int = 1,
     kv_cache_dtype: str | None = None,
     # END_KV_CACHE_ARGS
+    # START_GPU_ARGS
+    gpu: str | None = None,
+    overhead: float = 0.0,
+    gpu_vram_gib: float | None = None,
+    # END_GPU_ARGS
     json_output: bool = False,
     ignore_table_width: bool = False,
 ) -> Dict[str, Any] | None:
@@ -239,129 +253,163 @@ async def run(
             "NONE OF `model.safetensors`, `model.safetensors.index.json`, `model_index.json` HAS BEEN FOUND"
         )
 
-    cache_size = None
-    if experimental:
-        # NOTE: In theory, `config.json` should always be present, but checking beforehand just in case
-        if "config.json" in file_paths:
-            url = f"https://huggingface.co/{model_id}/resolve/{revision}/config.json"
-            config: Dict[str, Any] = await get_json_file(client, url, headers)
+    # Fetch config.json when needed for KV cache or GPU estimation
+    config = None
+    num_attention_heads = None
+    is_causal_or_condgen = False
+    if (experimental or gpu) and "config.json" in file_paths:
+        url = f"https://huggingface.co/{model_id}/resolve/{revision}/config.json"
+        config: Dict[str, Any] = await get_json_file(client, url, headers)
 
-            if "architectures" not in config or (
-                "architectures" in config
-                and not any(
-                    arch.__contains__("ForCausalLM") or arch.__contains__("ForConditionalGeneration")
-                    for arch in config["architectures"]
-                )
-            ):
+        # Check architecture before unwrapping text_config (which lacks the key)
+        is_causal_or_condgen = "architectures" in config and any(
+            "ForCausalLM" in arch or "ForConditionalGeneration" in arch
+            for arch in config["architectures"]
+        )
+
+        # Unwrap text_config for VLMs (ForConditionalGeneration)
+        if (
+            "architectures" in config
+            and any(arch.__contains__("ForConditionalGeneration") for arch in config["architectures"])
+            and "text_config" in config
+        ):
+            if experimental:
                 warnings.warn(
-                    "`--experimental` was provided, but either `config.json` doesn't have the `architectures` key meaning that the model architecture cannot be inferred, or rather that it's neither `...ForCausalLM` not `...ForConditionalGeneration`, meaning that the KV Cache estimation might not apply. If that's the case, then remove the `--experimental` flag from the command to suppress this warning."
+                    f"Given that `--model-id={model_id}` is a `...ForConditionalGeneration` model, then the configuration from `config.json` will be retrieved from the key `text_config` instead."
                 )
-            else:
-                if (
-                    any(arch.__contains__("ForConditionalGeneration") for arch in config["architectures"])
-                    and "text_config" in config
-                ):
-                    warnings.warn(
-                        f"Given that `--model-id={model_id}` is a `...ForConditionalGeneration` model, then the configuration from `config.json` will be retrieved from the key `text_config` instead."
-                    )
-                    config = config["text_config"]
+            config = config["text_config"]
 
-                if max_model_len is None:
-                    max_model_len = config.get(
-                        "max_position_embeddings",
-                        config.get("n_positions", config.get("max_seq_len", max_model_len)),
-                    )
+        num_attention_heads = config.get("num_attention_heads")
 
-                if max_model_len is None:
-                    warnings.warn(
-                        f"Either the `--max-model-len` was not set, is not available in `config.json` with the any of the keys: `max_position_embeddings`, `n_positions`, or `max_seq_len` (in that order of priority), or both; so the memory required to fit the context length cannot be estimated."
-                    )
+    # KV cache estimation (gated by --experimental only)
+    cache_size = None
+    if experimental and config:
+        if not is_causal_or_condgen:
+            warnings.warn(
+                "`--experimental` was provided, but either `config.json` doesn't have the `architectures` key meaning that the model architecture cannot be inferred, or rather that it's neither `...ForCausalLM` not `...ForConditionalGeneration`, meaning that the KV Cache estimation might not apply. If that's the case, then remove the `--experimental` flag from the command to suppress this warning."
+            )
+        else:
+            if max_model_len is None:
+                max_model_len = config.get(
+                    "max_position_embeddings",
+                    config.get("n_positions", config.get("max_seq_len", max_model_len)),
+                )
 
-                if not all(k in config for k in {"hidden_size", "num_hidden_layers", "num_attention_heads"}):  # type: ignore
-                    warnings.warn(
-                        f"`config.json` doesn't contain all the keys `hidden_size`, `num_hidden_layers`, and `num_attention_heads`, but only {config.keys()}."  # type: ignore
-                    )
+            if max_model_len is None:
+                warnings.warn(
+                    f"Either the `--max-model-len` was not set, is not available in `config.json` with the any of the keys: `max_position_embeddings`, `n_positions`, or `max_seq_len` (in that order of priority), or both; so the memory required to fit the context length cannot be estimated."
+                )
 
-                if kv_cache_dtype in {"fp8_e5m2", "fp8_e4m3"}:
-                    cache_dtype = kv_cache_dtype.upper().replace("FP8", "F8")
-                elif kv_cache_dtype in {"fp8", "fp8_ds_mla", "fp8_inc"}:
-                    # NOTE: Default to `F8_E4M3` for the calculations, given that all those take 1 byte, but only F8_E5M2
-                    # or `F8_E4M3` are supported in Safetensors, whilst `FP8_DS_MLA` (DeepSeek MLA) and `FP8_INC` (Intel HPUs)
-                    # are not; and `F8_E4M3` is supported on both CUDA and AMD, hence seems a reasonable default
-                    warnings.warn(
-                        f"--kv-cache-dtype={kv_cache_dtype}` has been provided, but given that none of those matches an actual Safetensors dtype since it should be any of `F8_E5M2` or `F8_E4M3`, the `--kv-cache-dtype` will default to `F8_E4M3` instead, which implies that the calculations are the same given that both dtypes take 1 byte despite the quantization scheme of it, or the hardware compatibility; so the estimations should be accurate enough."
-                    )
-                    cache_dtype = "F8_E4M3"
-                elif kv_cache_dtype == "bfloat16":
-                    cache_dtype = "BF16"
-                elif "quantization_config" in config and "quant_method" in config["quantization_config"]:
-                    _quantization_config = config["quantization_config"]
-                    _quant_method = _quantization_config["quant_method"]
+            if not all(k in config for k in {"hidden_size", "num_hidden_layers", "num_attention_heads"}):  # type: ignore
+                warnings.warn(
+                    f"`config.json` doesn't contain all the keys `hidden_size`, `num_hidden_layers`, and `num_attention_heads`, but only {config.keys()}."  # type: ignore
+                )
 
-                    if _quant_method != "fp8":  # NOTE: e.g., compressed-tensors for `moonshotai/Kimi-K2.5`
-                        raise RuntimeError(
-                            f"Provided `--kv-cache-dtype=auto` (or unset) and given that `config.json` contains the following `quantization_config={_quantization_config}` with a `quant_method` different than `fp8` i.e., `{_quant_method}`, which is not supported; you should enforce the `--kv-cache-dtype` value to whatever quantization precision it's using, if applicable.\nAs KV cache estimation is still experimental, as that might not be the case for your model, then feel free to open an issue at https://github.com/alvarobartt/hf-mem with a report and eventually what solution you would like to see implemented."
-                        )
+            if kv_cache_dtype in {"fp8_e5m2", "fp8_e4m3"}:
+                cache_dtype = kv_cache_dtype.upper().replace("FP8", "F8")
+            elif kv_cache_dtype in {"fp8", "fp8_ds_mla", "fp8_inc"}:
+                # NOTE: Default to `F8_E4M3` for the calculations, given that all those take 1 byte, but only F8_E5M2
+                # or `F8_E4M3` are supported in Safetensors, whilst `FP8_DS_MLA` (DeepSeek MLA) and `FP8_INC` (Intel HPUs)
+                # are not; and `F8_E4M3` is supported on both CUDA and AMD, hence seems a reasonable default
+                warnings.warn(
+                    f"--kv-cache-dtype={kv_cache_dtype}` has been provided, but given that none of those matches an actual Safetensors dtype since it should be any of `F8_E5M2` or `F8_E4M3`, the `--kv-cache-dtype` will default to `F8_E4M3` instead, which implies that the calculations are the same given that both dtypes take 1 byte despite the quantization scheme of it, or the hardware compatibility; so the estimations should be accurate enough."
+                )
+                cache_dtype = "F8_E4M3"
+            elif kv_cache_dtype == "bfloat16":
+                cache_dtype = "BF16"
+            elif "quantization_config" in config and "quant_method" in config["quantization_config"]:
+                _quantization_config = config["quantization_config"]
+                _quant_method = _quantization_config["quant_method"]
 
-                    _fmt = _quantization_config.get("fmt", _quantization_config.get("format", None))
-                    if _fmt:
-                        if not _fmt.startswith("float8_"):
-                            _fmt = f"float8_{_fmt}"
-
-                        if _fmt not in TorchDtypes.__args__:
-                            raise RuntimeError(
-                                f"Provided `--kv-cache-dtype=auto` (or unset) and given that `config.json` contains the following `quantization_config={_quantization_config}` with a `fmt` (or `format`) value of `{_fmt}` that's not supported (should be any of {TorchDtypes.__args__}), you might need to set `--kv-cache-dtype=fp8` to enforce the dtype instead of pulling it from the `config.json`.\nAs KV cache estimation is still experimental, as that might not be the case for your model, then feel free to open an issue at https://github.com/alvarobartt/hf-mem with a report and eventually what solution you would like to see implemented."
-                            )
-
-                        cache_dtype = torch_dtype_to_safetensors_dtype(_fmt)
-                    else:
-                        # NOTE: If `quant_method` in `quantization_config` is set to `fp8` and `fmt` is not set, then
-                        # we get the most used `F8_*` Safetensors dtype to map the `quant_method=fp8` to an actual Safetensors
-                        # dtype, as `F8` is not a valid dtype neither on PyTorch nor on Safetensors, as we need to append
-                        # the scheme / format.
-                        # SAFETY: As per the snippets above, if `_fmt` is None we assume that `_quant_method=fp8`
-                        cache_dtype = max(
-                            (
-                                l := [
-                                    d
-                                    for c in metadata.components.values()
-                                    for d in c.dtypes.keys()
-                                    if d in {"F8_E5M2", "F8_E4M3"}
-                                ]
-                            ),
-                            key=l.count,
-                            default=None,
-                        )
-
-                        # TODO: Not sure if we should default to `F8_E4M3` as a reasonable default as when `FP8`,
-                        # `FP8_DS_MLA` or `FP8_INC` are provided... to prevent raising an exception
-                        if not cache_dtype:
-                            raise RuntimeError(
-                                f"The `config.json` file for `--model-id={model_id}` contains `quantization_config={_quantization_config}` but the `quant_method=fp8` whereas any tensor in the model weights is set to any of `F8_E4M3` nor `F8_E5M2`, which means that the `F8_` format for the Safetensors dtype cannot be inferred; so you might need to set `--kv-cache-dtype=fp8` to enforce the dtype instead of pulling it from the `config.json`.\nAs KV cache estimation is still experimental, as that might not be the case for your model, then feel free to open an issue at https://github.com/alvarobartt/hf-mem with a report and eventually what solution you would like to see implemented."
-                            )
-                elif _cache_dtype := config.get("torch_dtype", None):
-                    cache_dtype = torch_dtype_to_safetensors_dtype(_cache_dtype)
-                elif _cache_dtype := config.get("dtype", None):
-                    cache_dtype = torch_dtype_to_safetensors_dtype(_cache_dtype)
-                else:
+                if _quant_method != "fp8":  # NOTE: e.g., compressed-tensors for `moonshotai/Kimi-K2.5`
                     raise RuntimeError(
-                        f"Provided `--kv-cache-dtype={kv_cache_dtype}` but it needs to be any of `auto`, `bfloat16`, `fp8`, `fp8_ds_mla`, `fp8_e4m3`, `fp8_e5m2` or `fp8_inc`. If `--kv-cache-dtype=auto` (or unset), then the `config.json` should either contain the `torch_dtype` or `dtype` fields set; or if quantized, then `quantization_config` needs to be set and contain the key `quant_method` with value `fp8` (as none of `fp32`, `fp16` or `bf16` is considered within the `quantization_config`), and optionally also contain `fmt` set to any valid FP8 format as `float8_e4m3` or `float8_e4m3fn`."
+                        f"Provided `--kv-cache-dtype=auto` (or unset) and given that `config.json` contains the following `quantization_config={_quantization_config}` with a `quant_method` different than `fp8` i.e., `{_quant_method}`, which is not supported; you should enforce the `--kv-cache-dtype` value to whatever quantization precision it's using, if applicable.\nAs KV cache estimation is still experimental, as that might not be the case for your model, then feel free to open an issue at https://github.com/alvarobartt/hf-mem with a report and eventually what solution you would like to see implemented."
                     )
 
-                # Reference: https://gist.github.com/alvarobartt/1097ca1b07c66fd71470937d599c2072
-                cache_size = (
-                    # NOTE: 2 because it applies to both key and value projections
-                    2
-                    * config.get("num_hidden_layers")  # type: ignore
-                    # NOTE: `num_key_value_heads` defaults to `num_attention_heads` in MHA
-                    * config.get("num_key_value_heads", config.get("num_attention_heads"))  # type: ignore
-                    * (config.get("hidden_size") // config.get("num_attention_heads"))  # type: ignore
-                    * max_model_len
-                    * get_safetensors_dtype_bytes(cache_dtype)
+                _fmt = _quantization_config.get("fmt", _quantization_config.get("format", None))
+                if _fmt:
+                    if not _fmt.startswith("float8_"):
+                        _fmt = f"float8_{_fmt}"
+
+                    if _fmt not in TorchDtypes.__args__:
+                        raise RuntimeError(
+                            f"Provided `--kv-cache-dtype=auto` (or unset) and given that `config.json` contains the following `quantization_config={_quantization_config}` with a `fmt` (or `format`) value of `{_fmt}` that's not supported (should be any of {TorchDtypes.__args__}), you might need to set `--kv-cache-dtype=fp8` to enforce the dtype instead of pulling it from the `config.json`.\nAs KV cache estimation is still experimental, as that might not be the case for your model, then feel free to open an issue at https://github.com/alvarobartt/hf-mem with a report and eventually what solution you would like to see implemented."
+                        )
+
+                    cache_dtype = torch_dtype_to_safetensors_dtype(_fmt)
+                else:
+                    # NOTE: If `quant_method` in `quantization_config` is set to `fp8` and `fmt` is not set, then
+                    # we get the most used `F8_*` Safetensors dtype to map the `quant_method=fp8` to an actual Safetensors
+                    # dtype, as `F8` is not a valid dtype neither on PyTorch nor on Safetensors, as we need to append
+                    # the scheme / format.
+                    # SAFETY: As per the snippets above, if `_fmt` is None we assume that `_quant_method=fp8`
+                    cache_dtype = max(
+                        (
+                            l := [
+                                d
+                                for c in metadata.components.values()
+                                for d in c.dtypes.keys()
+                                if d in {"F8_E5M2", "F8_E4M3"}
+                            ]
+                        ),
+                        key=l.count,
+                        default=None,
+                    )
+
+                    # TODO: Not sure if we should default to `F8_E4M3` as a reasonable default as when `FP8`,
+                    # `FP8_DS_MLA` or `FP8_INC` are provided... to prevent raising an exception
+                    if not cache_dtype:
+                        raise RuntimeError(
+                            f"The `config.json` file for `--model-id={model_id}` contains `quantization_config={_quantization_config}` but the `quant_method=fp8` whereas any tensor in the model weights is set to any of `F8_E4M3` nor `F8_E5M2`, which means that the `F8_` format for the Safetensors dtype cannot be inferred; so you might need to set `--kv-cache-dtype=fp8` to enforce the dtype instead of pulling it from the `config.json`.\nAs KV cache estimation is still experimental, as that might not be the case for your model, then feel free to open an issue at https://github.com/alvarobartt/hf-mem with a report and eventually what solution you would like to see implemented."
+                        )
+            elif _cache_dtype := config.get("torch_dtype", None):
+                cache_dtype = torch_dtype_to_safetensors_dtype(_cache_dtype)
+            elif _cache_dtype := config.get("dtype", None):
+                cache_dtype = torch_dtype_to_safetensors_dtype(_cache_dtype)
+            else:
+                raise RuntimeError(
+                    f"Provided `--kv-cache-dtype={kv_cache_dtype}` but it needs to be any of `auto`, `bfloat16`, `fp8`, `fp8_ds_mla`, `fp8_e4m3`, `fp8_e5m2` or `fp8_inc`. If `--kv-cache-dtype=auto` (or unset), then the `config.json` should either contain the `torch_dtype` or `dtype` fields set; or if quantized, then `quantization_config` needs to be set and contain the key `quant_method` with value `fp8` (as none of `fp32`, `fp16` or `bf16` is considered within the `quantization_config`), and optionally also contain `fmt` set to any valid FP8 format as `float8_e4m3` or `float8_e4m3fn`."
                 )
 
-                if batch_size:
-                    cache_size *= batch_size
+            # Reference: https://gist.github.com/alvarobartt/1097ca1b07c66fd71470937d599c2072
+            cache_size = (
+                # NOTE: 2 because it applies to both key and value projections
+                2
+                * config.get("num_hidden_layers")  # type: ignore
+                # NOTE: `num_key_value_heads` defaults to `num_attention_heads` in MHA
+                * config.get("num_key_value_heads", config.get("num_attention_heads"))  # type: ignore
+                * (config.get("hidden_size") // config.get("num_attention_heads"))  # type: ignore
+                * max_model_len
+                * get_safetensors_dtype_bytes(cache_dtype)
+            )
+
+            if batch_size:
+                cache_size *= batch_size
+
+    # GPU estimation (gated by --gpu only)
+    gpu_info = None
+    if gpu:
+        gpu_spec = get_gpu_spec(gpu)
+        if gpu_vram_gib is not None:
+            gpu_spec = GpuSpec(gpu_spec.name, gpu_vram_gib, gpu_spec.max_per_node)
+        total_bytes = metadata.bytes_count + (cache_size or 0)
+        raw_count, suggested_count, suggestion_reason_code = compute_gpu_count(
+            total_bytes, gpu_spec, overhead, num_attention_heads
+        )
+        suggestion_reason = get_suggestion_reason_text(suggestion_reason_code)
+        estimate_basis = "model weights + KV cache" if cache_size else "model weights only"
+        gpu_info = {
+            "gpu_name": gpu_spec.name,
+            "gpu_vram_gib": gpu_spec.vram_gib,
+            "gpu_vram_bytes": gpu_spec.vram_bytes,
+            "raw_count": raw_count,
+            "suggested_count": suggested_count,
+            "suggestion_reason": suggestion_reason,
+            "suggestion_reason_code": suggestion_reason_code,
+            "overhead": overhead,
+            "max_per_node": gpu_spec.max_per_node,
+            "estimate_basis": estimate_basis,
+        }
 
     if json_output:
         out = {"model_id": model_id, "revision": revision, **asdict(metadata)}
@@ -370,35 +418,39 @@ async def run(
             out["batch_size"] = batch_size
             out["cache_size"] = cache_size
             out["cache_dtype"] = cache_dtype  # type: ignore
+        if gpu_info:
+            out["gpu"] = gpu_info
         print(json.dumps(out))
     else:
-        # TODO: Use a `KvCache` dataclass instead and make sure that the JSON output is aligned
+        cache = None
         if experimental and cache_size:
-            print_report(
-                model_id=model_id,
-                revision=revision,
-                metadata=metadata,
-                cache={
-                    "max_model_len": max_model_len,
-                    "cache_size": cache_size,
-                    "batch_size": batch_size,
-                    "cache_dtype": cache_dtype,  # type: ignore
-                },
-                ignore_table_width=ignore_table_width,
-            )
-        else:
-            print_report(
-                model_id=model_id,
-                revision=revision,
-                metadata=metadata,
-                ignore_table_width=ignore_table_width,
-            )
+            cache = {
+                "max_model_len": max_model_len,
+                "cache_size": cache_size,
+                "batch_size": batch_size,
+                "cache_dtype": cache_dtype,  # type: ignore
+            }
+        print_report(
+            model_id=model_id,
+            revision=revision,
+            metadata=metadata,
+            cache=cache,
+            gpu=gpu_info,
+            ignore_table_width=ignore_table_width,
+        )
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        usage="%(prog)s [-h] [--model-id MODEL_ID] [--revision REVISION]\n"
+        "                [--experimental] [--max-model-len MAX_MODEL_LEN]\n"
+        "                [--batch-size BATCH_SIZE] [--kv-cache-dtype KV_CACHE_DTYPE]\n"
+        "                [--gpu GPU] [--list-gpus] [--overhead OVERHEAD]\n"
+        "                [--gpu-vram-gib GPU_VRAM_GIB]\n"
+        "                [--json-output] [--ignore-table-width]",
+    )
 
-    parser.add_argument("--model-id", required=True, help="Model ID on the Hugging Face Hub")
+    parser.add_argument("--model-id", required=False, help="Model ID on the Hugging Face Hub")
     parser.add_argument(
         "--revision",
         default="main",
@@ -433,6 +485,32 @@ def main() -> None:
     )
 
     parser.add_argument(
+        "--gpu",
+        type=str,
+        default=None,
+        help="GPU type to estimate count for. Use --list-gpus to see options.",
+    )
+    parser.add_argument(
+        "--list-gpus",
+        action="store_true",
+        help="List all supported GPU types and their VRAM, then exit.",
+    )
+    parser.add_argument(
+        "--overhead",
+        type=float,
+        default=0.0,
+        help="Fraction of VRAM reserved for overhead. E.g., 0.2 for 20%%. "
+        "Recommended: 0.2 for inference. Defaults to 0.0.",
+    )
+    parser.add_argument(
+        "--gpu-vram-gib",
+        type=float,
+        default=None,
+        help="Override the built-in VRAM (GiB) for the GPU specified by --gpu. "
+        "Useful when your hardware variant differs from the default.",
+    )
+
+    parser.add_argument(
         "--json-output",
         action="store_true",
         help="Whether to provide the output as a JSON instead of printed as table.",
@@ -445,22 +523,43 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    if args.list_gpus:
+        print(format_gpu_table())
+        return
+    if not args.model_id:
+        parser.error("--model-id is required unless --list-gpus is set")
+    if not (0 <= args.overhead < 1):
+        parser.error("--overhead must be >= 0 and < 1")
+    if args.gpu_vram_gib is not None and args.gpu is None:
+        parser.error("--gpu-vram-gib requires --gpu")
+    if args.gpu_vram_gib is not None and args.gpu_vram_gib <= 0:
+        parser.error("--gpu-vram-gib must be > 0")
+
     if args.experimental:
         warnings.warn(
             "`--experimental` is set, which means that models with an architecture as `...ForCausalLM` and `...ForConditionalGeneration` will include estimations for the KV Cache as well. You can also provide the args `--max-model-len` and `--batch-size` as part of the estimation. Note that enabling `--experimental` means that the output will be different both when displayed and when dumped as JSON with `--json-output`, so bear that in mind."
         )
 
-    asyncio.run(
-        run(
-            model_id=args.model_id,
-            revision=args.revision,
-            # NOTE: Below are the arguments that affect the KV cache estimation
-            experimental=args.experimental,
-            max_model_len=args.max_model_len,
-            batch_size=args.batch_size,
-            kv_cache_dtype=args.kv_cache_dtype,
-            # NOTE: Below are the arguments that affect the output format
-            json_output=args.json_output,
-            ignore_table_width=args.ignore_table_width,
+    try:
+        asyncio.run(
+            run(
+                model_id=args.model_id,
+                revision=args.revision,
+                # NOTE: Below are the arguments that affect the KV cache estimation
+                experimental=args.experimental,
+                max_model_len=args.max_model_len,
+                batch_size=args.batch_size,
+                kv_cache_dtype=args.kv_cache_dtype,
+                # NOTE: Below are the arguments that affect GPU estimation
+                gpu=args.gpu,
+                overhead=args.overhead,
+                gpu_vram_gib=args.gpu_vram_gib,
+                # NOTE: Below are the arguments that affect the output format
+                json_output=args.json_output,
+                ignore_table_width=args.ignore_table_width,
+            )
         )
-    )
+    except RuntimeError as e:
+        parser.exit(1, f"error: {e}\n")
+    except httpx.HTTPStatusError as e:
+        parser.exit(1, f"error: {e}\n")

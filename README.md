@@ -47,6 +47,40 @@ uvx hf-mem --model-id MiniMaxAI/MiniMax-M2 --experimental
 
 <img src="https://github.com/user-attachments/assets/64eaff88-d395-4d8d-849b-78fb86411dc3" />
 
+## GPU Count Estimation
+
+You can estimate how many GPUs are needed to host the model weights (and KV cache too if `--experimental` is enabled).
+
+List supported GPU presets:
+
+```bash
+uvx hf-mem --list-gpus
+```
+
+Estimate GPU count for a model:
+
+```bash
+uvx hf-mem --model-id Qwen/Qwen3.5-397B-A17B-FP8 --gpu h100
+```
+
+Reserve headroom with `--overhead`:
+
+```bash
+uvx hf-mem --model-id Qwen/Qwen3.5-397B-A17B-FP8 --gpu h100 --overhead 0.2
+```
+
+Override preset VRAM for cluster-specific variants:
+
+```bash
+uvx hf-mem --model-id Qwen/Qwen3.5-397B-A17B-FP8 --gpu l40s --gpu-vram-gib 32
+```
+
+Combine with KV cache estimation:
+
+```bash
+uvx hf-mem --model-id Qwen/Qwen3.5-397B-A17B-FP8 --experimental --gpu h200
+```
+
 ## (Optional) Agent Skills
 
 Optionally, you can add `hf-mem` as an agent skill, which allows the underlying coding agent to discover and use it when provided as a [`SKILL.md`](.skills/hf-mem/SKILL.md).
