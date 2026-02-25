@@ -18,9 +18,9 @@ from hf_mem.types import (
     TorchDtypes,
     compute_gpu_count,
     format_gpu_table,
-    get_suggestion_reason_text,
     get_gpu_spec,
     get_safetensors_dtype_bytes,
+    get_suggestion_reason_text,
     torch_dtype_to_safetensors_dtype,
 )
 
