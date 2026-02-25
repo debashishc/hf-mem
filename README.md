@@ -19,7 +19,7 @@ Read more information about `hf-mem` in [this short-form post](https://alvarobar
 uvx hf-mem --model-id MiniMaxAI/MiniMax-M2
 ```
 
-<img src="https://github.com/user-attachments/assets/530f8b14-a415-4fd6-9054-bcd81cafae09" />
+<img src="https://github.com/user-attachments/assets/530f8b14-a415-4fd6-9054-bcd81cafae09" width="600" />
 
 ### Diffusers
 
@@ -27,7 +27,7 @@ uvx hf-mem --model-id MiniMaxAI/MiniMax-M2
 uvx hf-mem --model-id Qwen/Qwen-Image
 ```
 
-<img src="https://github.com/user-attachments/assets/cd4234ec-bdcc-4db4-8b01-0ac9b5cd390c" />
+<img src="https://github.com/user-attachments/assets/cd4234ec-bdcc-4db4-8b01-0ac9b5cd390c" width="600" />
 
 ### Sentence Transformers
 
@@ -35,7 +35,7 @@ uvx hf-mem --model-id Qwen/Qwen-Image
 uvx hf-mem --model-id google/embeddinggemma-300m
 ```
 
-<img src="https://github.com/user-attachments/assets/a52c464b-a6c1-446d-9921-68aaefb9df88" />
+<img src="https://github.com/user-attachments/assets/a52c464b-a6c1-446d-9921-68aaefb9df88" width="600" />
 
 ## Experimental
 
@@ -45,7 +45,7 @@ By enabling the `--experimental` flag, you can enable the KV Cache memory estima
 uvx hf-mem --model-id MiniMaxAI/MiniMax-M2 --experimental
 ```
 
-<img src="https://github.com/user-attachments/assets/64eaff88-d395-4d8d-849b-78fb86411dc3" />
+<img src="https://github.com/user-attachments/assets/64eaff88-d395-4d8d-849b-78fb86411dc3" width="600" />
 
 ## GPU Count Estimation
 
